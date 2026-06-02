@@ -1,0 +1,152 @@
+name: nightly
+
+on:
+  schedule:
+    # Daily at 18:00 UTC. Scheduled runs only fire on the default branch.
+    - cron: '0 18 * * *'
+  workflow_dispatch:
+    inputs:
+      revs:
+        description: 'Specific changeset short-hashes to build (space-separated). Empty = auto-detect unbuilt revs.'
+        required: false
+        default: ''
+      max:
+        description: 'Max number of unbuilt revs to build in one run (backlog cap).'
+        required: false
+        default: '10'
+
+permissions:
+  contents: write
+
+env:
+  HG_URL: https://www.retrodev.com/repos/blastem
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Detect every upstream changeset that does not yet have a `nightly-<node>`
+  # release, oldest-first, capped. Emits a JSON matrix consumed by build jobs.
+  # ---------------------------------------------------------------------------
+  coordinate:
+    runs-on: ubuntu-latest
+    outputs:
+      revs: ${{ steps.detect.outputs.revs }}
+      has_work: ${{ steps.detect.outputs.has_work }}
+    steps:
+      - name: Install mercurial
+        run: sudo apt-get update && sudo apt-get install -y mercurial
+
+      - name: Detect unbuilt revisions
+        id: detect
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          MANUAL: ${{ github.event.inputs.revs }}
+          MAXIN: ${{ github.event.inputs.max }}
+        run: |
+          set -euo pipefail
+          hg clone -U "$HG_URL" upstream
+          gh release list --repo "$REPO" --limit 1000 --json tagName -q '.[].tagName' \
+            > /tmp/tags.txt 2>/dev/null || true
+          hg -R upstream log -r 'reverse(0:tip)' --template '{node|short}\n' > /tmp/nodes.txt
+
+          cat > /tmp/detect.py <<'PY'
+          import json, os
+          built = set()
+          try:
+              for line in open('/tmp/tags.txt'):
+                  line = line.strip()
+                  if line.startswith('nightly-'):
+                      built.add(line[len('nightly-'):])
+          except FileNotFoundError:
+              pass
+          nodes = [l.strip() for l in open('/tmp/nodes.txt') if l.strip()]  # newest first
+          manual = os.environ.get('MANUAL', '').split()
+          try:
+              cap = int(os.environ.get('MAXIN') or '10')
+          except ValueError:
+              cap = 10
+          import sys
+          if manual:
+              todo = manual
+          else:
+              todo = []
+              for n in nodes:
+                  if n in built:
+                      break
+                  todo.append(n)
+                  if len(todo) >= cap:
+                      print(f"::warning::Reached cap of {cap} unbuilt revs; "
+                            f"older unbuilt revs will be built on later runs.", file=sys.stderr)
+                      break
+              todo.reverse()  # chronological (oldest first)
+          revs = [{"node": n} for n in todo]
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write("revs=" + json.dumps(revs) + "\n")
+              out.write("has_work=" + ("true" if revs else "false") + "\n")
+          print("Revisions to build:", json.dumps(revs), file=sys.stderr)
+          PY
+          python3 /tmp/detect.py
+
+  # ---------------------------------------------------------------------------
+  # Job 1: WebAssembly (WebGL) build.
+  # ---------------------------------------------------------------------------
+  wasm:
+    needs: coordinate
+    if: needs.coordinate.outputs.has_work == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        rev: ${{ fromJSON(needs.coordinate.outputs.revs) }}
+    steps:
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y mercurial python3 zip
+
+      - name: Setup emscripten
+        uses: mymindstorm/setup-emsdk@v14
+
+      - name: Fetch source @ ${{ matrix.rev.node }}
+        run: |
+          set -euo pipefail
+          hg clone "$HG_URL" src
+          cd src
+          hg up -r "${{ matrix.rev.node }}"
+          # Version stamp (CI-only, not committed) — mirrors upstream nightly behaviour.
+          sed -i -E "s/(define BLASTEM_VERSION \"[^-]+)-pre\"/\1-pre-${{ matrix.rev.node }}\"/" version.inc || true
+
+      - name: Build (wasm)
+        working-directory: src
+        run: |
+          set -euo pipefail
+          # Generate the CPU cores first (heavy single translation units) to keep memory sane.
+          make CC=emcc CPU=wasm m68k.c z80.c
+          make CC=emcc CPU=wasm blastem.html
+
+      - name: Package
+        working-directory: src
+        run: |
+          set -euo pipefail
+          ver=$(sed -E -n 's/^[^B]+BLASTEM_VERSION "([^"]+)"/\1/p' version.inc)
+          dir="blastem-wasm-${ver}"
+          mkdir "$dir"
+          for f in blastem.html blastem.js blastem.wasm blastem.data; do
+            [ -f "$f" ] && cp "$f" "$dir"/ || true
+          done
+          cp blastem.html "$dir"/index.html
+          cp COPYING "$dir"/COPYING
+          zip -r "${dir}.zip" "$dir"
+          ls -la "${dir}.zip"
+
+      - name: Publish to release nightly-${{ matrix.rev.node }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nightly-${{ matrix.rev.node }}
+          name: BlastEm nightly ${{ matrix.rev.node }}
+          prerelease: true
+          body: |
+            Unofficial automated build of BlastEm at upstream changeset `${{ matrix.rev.node }}`.
+
+            Source (unmodified): <https://www.retrodev.com/repos/blastem>
+            BlastEm is GPLv3, created by Michael Pavone.
+          files: src/blastem-wasm-*.zip
+          fail_on_unmatched_files: true

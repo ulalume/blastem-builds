@@ -1,0 +1,5 @@
+upstream/
+*.tar.gz
+*.zip
+*.dSYM/
+.DS_Store
