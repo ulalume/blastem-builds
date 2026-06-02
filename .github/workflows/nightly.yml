@@ -132,7 +132,7 @@ jobs:
         rev: ${{ fromJSON(needs.coordinate.outputs.revs) }}
     steps:
       - name: Install tools
-        run: sudo apt-get update && sudo apt-get install -y zip
+        run: sudo apt-get update && sudo apt-get install -y zip fonts-dejavu-core
 
       - name: Setup emscripten
         uses: mymindstorm/setup-emsdk@v14
@@ -157,6 +157,10 @@ jobs:
           # by default. Upstream compiles cleanly on older clang, so downgrade just those
           # back to warnings via CC flags (no source changes).
           EMCC="emcc -Wno-error=incompatible-pointer-types -Wno-error=incompatible-function-pointer-types -Wno-error=int-conversion -Wno-error=implicit-int"
+          # Upstream embeds DroidSans.ttf at link time, but the font is not in the repo.
+          # font_web.c loads it by literal name, so any TrueType font works. DejaVuSans
+          # (from apt, permissively licensed) is supplied under that name.
+          cp /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf DroidSans.ttf
           # Generate the CPU cores first (heavy single translation units) to keep memory sane.
           make CC=emcc CPU=wasm m68k.c z80.c
           make CC="$EMCC" CPU=wasm blastem.html
