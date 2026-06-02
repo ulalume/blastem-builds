@@ -33,17 +33,8 @@ release with all platforms:
 
 1. A scheduled workflow (daily) and manual `workflow_dispatch` detect every recent changeset
    that does **not** yet have a release, using upstream's lightweight **hgweb HTTP** API.
-2. **Every unbuilt changeset is built** (not just the latest), so multiple commits in a day
-   are all covered. A per-run cap prevents runaway backfills.
-3. Each changeset gets one GitHub **pre-release** tagged `nightly-<changeset>` with the
+2. Each changeset gets one GitHub **pre-release** tagged `nightly-<changeset>` with the
    artifacts for every platform attached.
-
-### Easy on upstream
-
-No `hg clone` is ever performed. Each run makes **one small JSON request** (`/json-log`,
-a few KB) to find new changesets, and downloads a **~2 MB source archive only for genuinely
-new revisions** (usually none on a quiet day). "What has been built" is tracked entirely by
-the GitHub release tags, so nothing extra is mirrored.
 
 Builds are **portable bundles**: required runtime libraries (SDL2, etc.) are included, so no
 separate installation is needed.
