@@ -2,8 +2,11 @@ name: nightly
 
 on:
   schedule:
-    # Daily at 18:00 UTC. Scheduled runs only fire on the default branch.
-    - cron: '0 18 * * *'
+    # ~1 hour after upstream's nightly (which starts at 11:45 PM US Pacific).
+    # 08:45 UTC = 12:45 AM PST (+1h) / 01:45 AM PDT (+2h) — always after upstream.
+    # (cron is fixed UTC and does not follow DST.) Scheduled runs only fire on the
+    # default branch and may be delayed under GitHub load.
+    - cron: '45 8 * * *'
   workflow_dispatch:
     inputs:
       revs:
