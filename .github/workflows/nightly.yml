@@ -20,13 +20,18 @@ permissions:
 
 env:
   HG_URL: https://www.retrodev.com/repos/blastem
+  # Recent clang (19+) and Apple clang promote several legacy C warnings to errors
+  # by default. Upstream compiles cleanly on older clang, so downgrade just those
+  # back to warnings (no source changes). Harmless for gcc/mingw.
+  CWARN: '-Wno-error=incompatible-pointer-types -Wno-error=incompatible-function-pointer-types -Wno-error=int-conversion -Wno-error=implicit-int'
+  SDL_WIN_VER: '2.30.9'
+  GLEW_WIN_VER: '2.2.0'
 
 jobs:
   # ---------------------------------------------------------------------------
   # Clone upstream ONCE, detect every changeset that does not yet have a
   # `nightly-<node>` release (oldest-first, capped), and publish a per-rev
-  # source tarball as an artifact for the build jobs to consume. Cloning once
-  # here (instead of in every build job) avoids hammering upstream / 403s.
+  # source tarball + release-notes markdown as an artifact for the build jobs.
   # ---------------------------------------------------------------------------
   coordinate:
     runs-on: ubuntu-latest
@@ -142,7 +147,7 @@ jobs:
           retention-days: 2
 
   # ---------------------------------------------------------------------------
-  # Job 1: WebAssembly (WebGL) build.
+  # WebAssembly (WebGL).
   # ---------------------------------------------------------------------------
   wasm:
     needs: coordinate
@@ -155,38 +160,26 @@ jobs:
     steps:
       - name: Install tools
         run: sudo apt-get update && sudo apt-get install -y zip fonts-dejavu-core
-
       - name: Setup emscripten
         uses: mymindstorm/setup-emsdk@v14
-
       - name: Download sources
         uses: actions/download-artifact@v4
         with:
           name: sources
-
       - name: Extract source @ ${{ matrix.rev.node }}
         run: |
           set -euo pipefail
           tar xzf "src-${{ matrix.rev.node }}.tgz"
-          # Version stamp (CI-only) — mirrors upstream nightly behaviour.
           sed -i -E "s/(define BLASTEM_VERSION \"[^-]+)-pre\"/\1-pre-${{ matrix.rev.node }}\"/" src/version.inc || true
-
       - name: Build (wasm)
         working-directory: src
         run: |
           set -euo pipefail
-          # Recent emscripten/clang (19+) promotes several legacy C warnings to errors
-          # by default. Upstream compiles cleanly on older clang, so downgrade just those
-          # back to warnings via CC flags (no source changes).
-          EMCC="emcc -Wno-error=incompatible-pointer-types -Wno-error=incompatible-function-pointer-types -Wno-error=int-conversion -Wno-error=implicit-int"
-          # Upstream embeds DroidSans.ttf at link time, but the font is not in the repo.
-          # font_web.c loads it by literal name, so any TrueType font works. DejaVuSans
-          # (from apt, permissively licensed) is supplied under that name.
+          # Upstream embeds DroidSans.ttf at link time but the font is not in the repo.
+          # font_web.c loads it by literal name, so any TrueType font works.
           cp /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf DroidSans.ttf
-          # Generate the CPU cores first (heavy single translation units) to keep memory sane.
           make CC=emcc CPU=wasm m68k.c z80.c
-          make CC="$EMCC" CPU=wasm blastem.html
-
+          make CC="emcc $CWARN" CPU=wasm blastem.html
       - name: Package
         working-directory: src
         run: |
@@ -200,9 +193,7 @@ jobs:
           cp blastem.html "$dir"/index.html
           cp COPYING "$dir"/COPYING
           zip -r "${dir}.zip" "$dir"
-          ls -la "${dir}.zip"
-
-      - name: Publish to release nightly-${{ matrix.rev.node }}
+      - name: Publish
         uses: softprops/action-gh-release@v2
         with:
           tag_name: nightly-${{ matrix.rev.node }}
@@ -213,56 +204,95 @@ jobs:
           fail_on_unmatched_files: true
 
   # ---------------------------------------------------------------------------
-  # Job 2: macOS Apple Silicon (.app, self-contained via dylibbundler).
-  # (Intel + Universal lipo will be added next.)
+  # macOS: build each arch natively (brew + dylibbundler), then lipo into one
+  # Universal .app.
   # ---------------------------------------------------------------------------
-  macos-arm64:
+  macos-build:
     needs: coordinate
     if: needs.coordinate.outputs.has_work == 'true'
-    runs-on: macos-14
+    runs-on: ${{ matrix.arch == 'arm64' && 'macos-15' || 'macos-13' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        rev: ${{ fromJSON(needs.coordinate.outputs.revs) }}
+        arch: [x86_64, arm64]
+    steps:
+      - name: Install dependencies
+        run: brew install sdl2 glew pkg-config dylibbundler
+      - name: Download sources
+        uses: actions/download-artifact@v4
+        with:
+          name: sources
+      - name: Extract source @ ${{ matrix.rev.node }}
+        run: |
+          set -euo pipefail
+          tar xzf "src-${{ matrix.rev.node }}.tgz"
+      - name: Build (${{ matrix.arch }})
+        working-directory: src
+        run: |
+          set -euo pipefail
+          make CC="cc $CWARN" blastem
+          file blastem
+      - name: Stage binary + bundled dylibs
+        working-directory: src
+        run: |
+          set -euo pipefail
+          rm -rf stage && mkdir -p stage/Frameworks
+          cp blastem stage/
+          dylibbundler -od -b -x stage/blastem \
+            -d stage/Frameworks -p "@executable_path/../Frameworks/"
+          tar -cf "macstage-${{ matrix.arch }}.tar" -C stage .
+      - name: Upload arch stage
+        uses: actions/upload-artifact@v4
+        with:
+          name: macstage-${{ matrix.arch }}-${{ matrix.rev.node }}
+          path: src/macstage-${{ matrix.arch }}.tar
+          retention-days: 2
+
+  macos-universal:
+    needs: [coordinate, macos-build]
+    if: needs.coordinate.outputs.has_work == 'true'
+    runs-on: macos-15
     strategy:
       fail-fast: false
       matrix:
         rev: ${{ fromJSON(needs.coordinate.outputs.revs) }}
     steps:
-      - name: Install dependencies
-        run: brew install sdl2 glew pkg-config dylibbundler
-
       - name: Download sources
         uses: actions/download-artifact@v4
         with:
           name: sources
-
-      - name: Extract source @ ${{ matrix.rev.node }}
+      - name: Download arch stages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: macstage-*-${{ matrix.rev.node }}
+          path: stages
+      - name: Build Universal .app
         run: |
           set -euo pipefail
           tar xzf "src-${{ matrix.rev.node }}.tgz"
-          # BSD sed needs an explicit (empty) backup suffix.
           sed -i '' -E "s/(define BLASTEM_VERSION \"[^-]+)-pre\"/\1-pre-${{ matrix.rev.node }}\"/" src/version.inc || true
+          ver=$(sed -E -n 's/^[^B]+BLASTEM_VERSION "([^"]+)"/\1/p' src/version.inc)
 
-      - name: Build (arm64)
-        working-directory: src
-        run: |
-          set -euo pipefail
-          # Same legacy-C warning downgrade as wasm (Apple clang also defaults some to errors).
-          CCFLAGS="-Wno-error=incompatible-pointer-types -Wno-error=incompatible-function-pointer-types -Wno-error=int-conversion -Wno-error=implicit-int"
-          make CC="cc $CCFLAGS" blastem
-          file blastem
+          mkdir -p arm x86
+          tar xf "stages/macstage-arm64-${{ matrix.rev.node }}/macstage-arm64.tar" -C arm
+          tar xf "stages/macstage-x86_64-${{ matrix.rev.node }}/macstage-x86_64.tar" -C x86
 
-      - name: Assemble .app
-        working-directory: src
-        run: |
-          set -euo pipefail
-          ver=$(sed -E -n 's/^[^B]+BLASTEM_VERSION "([^"]+)"/\1/p' version.inc)
           APP="BlastEm.app"
           rm -rf "$APP"
           mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks"
-          # blastem reads its data files from the executable's directory.
-          cp blastem "$APP/Contents/MacOS/"
-          cp -R shaders images default.cfg rom.db gamecontrollerdb.txt systems.cfg COPYING "$APP/Contents/MacOS/"
-          # Bundle non-system dylibs (SDL2, GLEW, ...) into the app and rewrite install names.
-          dylibbundler -od -b -x "$APP/Contents/MacOS/blastem" \
-            -d "$APP/Contents/Frameworks" -p "@executable_path/../Frameworks/"
+          lipo -create arm/blastem x86/blastem -output "$APP/Contents/MacOS/blastem"
+          for f in arm/Frameworks/*; do
+            name=$(basename "$f")
+            if [ -f "x86/Frameworks/$name" ]; then
+              lipo -create "$f" "x86/Frameworks/$name" -output "$APP/Contents/Frameworks/$name" 2>/dev/null \
+                || cp "$f" "$APP/Contents/Frameworks/$name"
+            else
+              cp "$f" "$APP/Contents/Frameworks/$name"
+            fi
+          done
+          # Data assets (read from the executable's directory by blastem).
+          cp -R src/shaders src/images src/default.cfg src/rom.db src/gamecontrollerdb.txt src/systems.cfg src/COPYING "$APP/Contents/MacOS/"
           cat > "$APP/Contents/Info.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -278,18 +308,201 @@ jobs:
             <key>NSHighResolutionCapable</key><true/>
           </dict></plist>
           PLIST
-          # Ad-hoc signature so the bundle is internally consistent (still "unidentified").
           codesign --force --deep -s - "$APP" || true
-          out="BlastEm-macOS-arm64-${ver}"
-          ditto -c -k --sequesterRsrc --keepParent "$APP" "${out}.zip"
-          ls -la "${out}.zip"
-
-      - name: Publish to release nightly-${{ matrix.rev.node }}
+          echo "=== verify universal ==="; lipo -info "$APP/Contents/MacOS/blastem"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "BlastEm-macOS-${ver}.zip"
+          ls -la "BlastEm-macOS-${ver}.zip"
+      - name: Publish
         uses: softprops/action-gh-release@v2
         with:
           tag_name: nightly-${{ matrix.rev.node }}
           name: BlastEm nightly ${{ matrix.rev.node }}
           prerelease: true
           body_path: body-${{ matrix.rev.node }}.md
-          files: src/BlastEm-macOS-arm64-*.zip
+          files: BlastEm-macOS-*.zip
+          fail_on_unmatched_files: true
+
+  # ---------------------------------------------------------------------------
+  # Linux x86_64 (JIT) and arm64 (interpreter), native runners.
+  # Portable: bundle libSDL2/libGLEW next to the binary with $ORIGIN/lib rpath.
+  # ---------------------------------------------------------------------------
+  linux:
+    needs: coordinate
+    if: needs.coordinate.outputs.has_work == 'true'
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        rev: ${{ fromJSON(needs.coordinate.outputs.revs) }}
+        arch: [x86_64, arm64]
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential python3 libsdl2-dev libglew-dev zlib1g-dev patchelf zip file
+      - name: Download sources
+        uses: actions/download-artifact@v4
+        with:
+          name: sources
+      - name: Extract source @ ${{ matrix.rev.node }}
+        run: |
+          set -euo pipefail
+          tar xzf "src-${{ matrix.rev.node }}.tgz"
+          sed -i -E "s/(define BLASTEM_VERSION \"[^-]+)-pre\"/\1-pre-${{ matrix.rev.node }}\"/" src/version.inc || true
+      - name: Build (${{ matrix.arch }})
+        working-directory: src
+        run: |
+          set -euo pipefail
+          make CC="gcc $CWARN" blastem
+          file blastem
+      - name: Package (portable)
+        working-directory: src
+        run: |
+          set -euo pipefail
+          ver=$(sed -E -n 's/^[^B]+BLASTEM_VERSION "([^"]+)"/\1/p' version.inc)
+          dir="blastem-linux-${{ matrix.arch }}-${ver}"
+          mkdir -p "$dir/lib"
+          cp blastem "$dir/"
+          cp -r shaders images default.cfg rom.db gamecontrollerdb.txt systems.cfg COPYING "$dir/"
+          # Bundle the non-system libraries (SDL2, GLEW); leave GL/X/audio to the host.
+          ldd blastem | awk '/libSDL2|libGLEW/ {print $3}' | while read -r p; do
+            [ -n "$p" ] && cp -Lv "$p" "$dir/lib/"
+          done
+          patchelf --set-rpath '$ORIGIN/lib' "$dir/blastem"
+          tar czf "${dir}.tar.gz" "$dir"
+          ls -la "${dir}.tar.gz"
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nightly-${{ matrix.rev.node }}
+          name: BlastEm nightly ${{ matrix.rev.node }}
+          prerelease: true
+          body_path: body-${{ matrix.rev.node }}.md
+          files: src/blastem-linux-*.tar.gz
+          fail_on_unmatched_files: true
+
+  # ---------------------------------------------------------------------------
+  # Linux x86 (32-bit, JIT) via multilib.
+  # ---------------------------------------------------------------------------
+  linux-i686:
+    needs: coordinate
+    if: needs.coordinate.outputs.has_work == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        rev: ${{ fromJSON(needs.coordinate.outputs.revs) }}
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y build-essential gcc-multilib python3 patchelf zip file \
+            libsdl2-dev:i386 libglew-dev:i386 zlib1g-dev:i386
+      - name: Download sources
+        uses: actions/download-artifact@v4
+        with:
+          name: sources
+      - name: Extract source @ ${{ matrix.rev.node }}
+        run: |
+          set -euo pipefail
+          tar xzf "src-${{ matrix.rev.node }}.tgz"
+          sed -i -E "s/(define BLASTEM_VERSION \"[^-]+)-pre\"/\1-pre-${{ matrix.rev.node }}\"/" src/version.inc || true
+      - name: Build (i686)
+        working-directory: src
+        env:
+          PKG_CONFIG_PATH: /usr/lib/i386-linux-gnu/pkgconfig
+          PKG_CONFIG_LIBDIR: /usr/lib/i386-linux-gnu/pkgconfig:/usr/share/pkgconfig
+        run: |
+          set -euo pipefail
+          make CPU=i686 CC="gcc $CWARN" blastem
+          file blastem
+      - name: Package (portable)
+        working-directory: src
+        run: |
+          set -euo pipefail
+          ver=$(sed -E -n 's/^[^B]+BLASTEM_VERSION "([^"]+)"/\1/p' version.inc)
+          dir="blastem-linux-i686-${ver}"
+          mkdir -p "$dir/lib"
+          cp blastem "$dir/"
+          cp -r shaders images default.cfg rom.db gamecontrollerdb.txt systems.cfg COPYING "$dir/"
+          ldd blastem | awk '/libSDL2|libGLEW/ {print $3}' | while read -r p; do
+            [ -n "$p" ] && cp -Lv "$p" "$dir/lib/"
+          done
+          patchelf --set-rpath '$ORIGIN/lib' "$dir/blastem"
+          tar czf "${dir}.tar.gz" "$dir"
+          ls -la "${dir}.tar.gz"
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nightly-${{ matrix.rev.node }}
+          name: BlastEm nightly ${{ matrix.rev.node }}
+          prerelease: true
+          body_path: body-${{ matrix.rev.node }}.md
+          files: src/blastem-linux-i686-*.tar.gz
+          fail_on_unmatched_files: true
+
+  # ---------------------------------------------------------------------------
+  # Windows x86_64 and x86 (32-bit), cross-compiled with mingw-w64 (as upstream).
+  # ---------------------------------------------------------------------------
+  windows:
+    needs: coordinate
+    if: needs.coordinate.outputs.has_work == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        rev: ${{ fromJSON(needs.coordinate.outputs.revs) }}
+        arch: [x86_64, i686]
+    steps:
+      - name: Install mingw + tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mingw-w64 python3 zip unzip wget
+      - name: Download sources
+        uses: actions/download-artifact@v4
+        with:
+          name: sources
+      - name: Extract source @ ${{ matrix.rev.node }}
+        run: |
+          set -euo pipefail
+          tar xzf "src-${{ matrix.rev.node }}.tgz"
+          sed -i -E "s/(define BLASTEM_VERSION \"[^-]+)-pre\"/\1-pre-${{ matrix.rev.node }}\"/" src/version.inc || true
+      - name: Fetch Windows SDL2 + GLEW dev libraries
+        working-directory: src
+        run: |
+          set -euo pipefail
+          wget -q "https://github.com/libsdl-org/SDL/releases/download/release-${SDL_WIN_VER}/SDL2-devel-${SDL_WIN_VER}-mingw.tar.gz"
+          mkdir sdl && tar xzf "SDL2-devel-${SDL_WIN_VER}-mingw.tar.gz" -C sdl --strip-components=1
+          wget -q "https://github.com/nigels-com/glew/releases/download/glew-${GLEW_WIN_VER}/glew-${GLEW_WIN_VER}-win32.zip"
+          unzip -q "glew-${GLEW_WIN_VER}-win32.zip"
+          mv "glew-${GLEW_WIN_VER}" glew
+      - name: Build (${{ matrix.arch }})
+        working-directory: src
+        run: |
+          set -euo pipefail
+          make PORTABLE=1 OS=Windows CPU=${{ matrix.arch }} SDL=sdl2 blastem.exe
+          file blastem.exe
+      - name: Package
+        working-directory: src
+        run: |
+          set -euo pipefail
+          ver=$(sed -E -n 's/^[^B]+BLASTEM_VERSION "([^"]+)"/\1/p' version.inc)
+          if [ "${{ matrix.arch }}" = "x86_64" ]; then triple=x86_64-w64-mingw32; suffix=win64; else triple=i686-w64-mingw32; suffix=win32; fi
+          dir="blastem-${suffix}-${ver}"
+          mkdir "$dir"
+          cp blastem.exe "$dir/"
+          cp "sdl/${triple}/bin/SDL2.dll" "$dir/"
+          cp -r shaders images default.cfg rom.db gamecontrollerdb.txt systems.cfg "$dir/"
+          cp COPYING "$dir/COPYING.txt"
+          zip -r "${dir}.zip" "$dir"
+          ls -la "${dir}.zip"
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nightly-${{ matrix.rev.node }}
+          name: BlastEm nightly ${{ matrix.rev.node }}
+          prerelease: true
+          body_path: body-${{ matrix.rev.node }}.md
+          files: src/blastem-win*.zip
           fail_on_unmatched_files: true
