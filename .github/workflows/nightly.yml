@@ -272,8 +272,9 @@ jobs:
           # GLEW (universal) via its Makefile
           curl -fSL -o glew.tgz "https://github.com/nigels-com/glew/releases/download/glew-${GLEW_WIN_VER}/glew-${GLEW_WIN_VER}.tgz"
           mkdir glewsrc && tar xzf glew.tgz -C glewsrc --strip-components=1
-          make -C glewsrc GLEW_DEST="$UNIV" 'CFLAGS.EXTRA=-arch arm64 -arch x86_64' 'LDFLAGS.EXTRA=-arch arm64 -arch x86_64' all
-          make -C glewsrc GLEW_DEST="$UNIV" install.all
+          # STRIP=true: skip `strip`, which rejects fat (universal) objects inside a .a archive.
+          make -C glewsrc GLEW_DEST="$UNIV" 'CFLAGS.EXTRA=-arch arm64 -arch x86_64' 'LDFLAGS.EXTRA=-arch arm64 -arch x86_64' STRIP=true all
+          make -C glewsrc GLEW_DEST="$UNIV" STRIP=true install.all
           # Deterministic glew.pc (do not depend on GLEW's installer details).
           printf 'prefix=%s\nlibdir=${prefix}/lib\nincludedir=${prefix}/include\nName: glew\nDescription: GLEW\nVersion: %s\nCflags: -I${includedir}\nLibs: -L${libdir} -lGLEW -framework OpenGL\n' \
             "$UNIV" "${GLEW_WIN_VER}" > "$UNIV/lib/pkgconfig/glew.pc"
