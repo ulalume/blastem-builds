@@ -275,6 +275,10 @@ jobs:
       matrix:
         rev: ${{ fromJSON(needs.coordinate.outputs.revs) }}
     steps:
+      - name: Checkout this repo (for assets)
+        uses: actions/checkout@v4
+        with:
+          path: ci
       - name: Download sources
         uses: actions/download-artifact@v4
         with:
@@ -310,6 +314,10 @@ jobs:
           done
           # Data assets (read from the executable's directory by blastem).
           cp -R src/shaders src/images src/default.cfg src/rom.db src/gamecontrollerdb.txt src/systems.cfg src/COPYING "$APP/Contents/MacOS/"
+          # App icon: a pre-built .icns committed to this repo (assets/), so the build
+          # never depends on upstream's icon file/format and does no runtime conversion.
+          mkdir -p "$APP/Contents/Resources"
+          cp ci/assets/BlastEm.icns "$APP/Contents/Resources/BlastEm.icns"
           cat > "$APP/Contents/Info.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -320,6 +328,7 @@ jobs:
             <key>CFBundleVersion</key><string>${ver}</string>
             <key>CFBundleShortVersionString</key><string>${ver}</string>
             <key>CFBundleExecutable</key><string>blastem</string>
+            <key>CFBundleIconFile</key><string>BlastEm</string>
             <key>CFBundlePackageType</key><string>APPL</string>
             <key>LSMinimumSystemVersion</key><string>10.13</string>
             <key>NSHighResolutionCapable</key><true/>
