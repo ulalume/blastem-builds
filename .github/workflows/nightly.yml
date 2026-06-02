@@ -99,7 +99,7 @@ jobs:
           PY
           python3 /tmp/detect.py
 
-      - name: Archive per-rev sources
+      - name: Archive sources and release notes
         if: steps.detect.outputs.has_work == 'true'
         run: |
           set -euo pipefail
@@ -107,7 +107,27 @@ jobs:
           while read -r n || [ -n "$n" ]; do
             [ -n "$n" ] || continue
             hg archive -R upstream -r "$n" -t tgz -p src "sources/src-$n.tgz"
-            echo "archived $n"
+            author=$(hg -R upstream log -r "$n" --template '{author}')
+            cdate=$(hg -R upstream log -r "$n" --template '{date|isodate}')
+            hg -R upstream log -r "$n" --template '{desc}' > /tmp/desc.txt
+            {
+              echo "Unofficial automated build of BlastEm at upstream changeset [\`$n\`](https://www.retrodev.com/repos/blastem/rev/$n)."
+              echo
+              echo "- **Author:** $author"
+              echo "- **Date:** $cdate"
+              echo "- **Changeset:** [\`$n\`](https://www.retrodev.com/repos/blastem/rev/$n)"
+              echo
+              echo "**Commit message**"
+              echo
+              echo '```'
+              cat /tmp/desc.txt
+              echo
+              echo '```'
+              echo
+              echo "---"
+              echo "Source is unmodified upstream. BlastEm is GPLv3, created by Michael Pavone."
+            } > "sources/body-$n.md"
+            echo "prepared $n"
           done < /tmp/todo.txt
           ls -la sources
 
@@ -116,7 +136,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: sources
-          path: sources/*.tgz
+          path: |
+            sources/*.tgz
+            sources/*.md
           retention-days: 2
 
   # ---------------------------------------------------------------------------
@@ -186,10 +208,88 @@ jobs:
           tag_name: nightly-${{ matrix.rev.node }}
           name: BlastEm nightly ${{ matrix.rev.node }}
           prerelease: true
-          body: |
-            Unofficial automated build of BlastEm at upstream changeset `${{ matrix.rev.node }}`.
-
-            Source (unmodified): <https://www.retrodev.com/repos/blastem>
-            BlastEm is GPLv3, created by Michael Pavone.
+          body_path: body-${{ matrix.rev.node }}.md
           files: src/blastem-wasm-*.zip
+          fail_on_unmatched_files: true
+
+  # ---------------------------------------------------------------------------
+  # Job 2: macOS Apple Silicon (.app, self-contained via dylibbundler).
+  # (Intel + Universal lipo will be added next.)
+  # ---------------------------------------------------------------------------
+  macos-arm64:
+    needs: coordinate
+    if: needs.coordinate.outputs.has_work == 'true'
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        rev: ${{ fromJSON(needs.coordinate.outputs.revs) }}
+    steps:
+      - name: Install dependencies
+        run: brew install sdl2 glew pkg-config dylibbundler
+
+      - name: Download sources
+        uses: actions/download-artifact@v4
+        with:
+          name: sources
+
+      - name: Extract source @ ${{ matrix.rev.node }}
+        run: |
+          set -euo pipefail
+          tar xzf "src-${{ matrix.rev.node }}.tgz"
+          # BSD sed needs an explicit (empty) backup suffix.
+          sed -i '' -E "s/(define BLASTEM_VERSION \"[^-]+)-pre\"/\1-pre-${{ matrix.rev.node }}\"/" src/version.inc || true
+
+      - name: Build (arm64)
+        working-directory: src
+        run: |
+          set -euo pipefail
+          # Same legacy-C warning downgrade as wasm (Apple clang also defaults some to errors).
+          CCFLAGS="-Wno-error=incompatible-pointer-types -Wno-error=incompatible-function-pointer-types -Wno-error=int-conversion -Wno-error=implicit-int"
+          make CC="cc $CCFLAGS" blastem
+          file blastem
+
+      - name: Assemble .app
+        working-directory: src
+        run: |
+          set -euo pipefail
+          ver=$(sed -E -n 's/^[^B]+BLASTEM_VERSION "([^"]+)"/\1/p' version.inc)
+          APP="BlastEm.app"
+          rm -rf "$APP"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks"
+          # blastem reads its data files from the executable's directory.
+          cp blastem "$APP/Contents/MacOS/"
+          cp -R shaders images default.cfg rom.db gamecontrollerdb.txt systems.cfg COPYING "$APP/Contents/MacOS/"
+          # Bundle non-system dylibs (SDL2, GLEW, ...) into the app and rewrite install names.
+          dylibbundler -od -b -x "$APP/Contents/MacOS/blastem" \
+            -d "$APP/Contents/Frameworks" -p "@executable_path/../Frameworks/"
+          cat > "$APP/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleName</key><string>BlastEm</string>
+            <key>CFBundleDisplayName</key><string>BlastEm</string>
+            <key>CFBundleIdentifier</key><string>com.retrodev.blastem.unofficial</string>
+            <key>CFBundleVersion</key><string>${ver}</string>
+            <key>CFBundleShortVersionString</key><string>${ver}</string>
+            <key>CFBundleExecutable</key><string>blastem</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>LSMinimumSystemVersion</key><string>10.13</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict></plist>
+          PLIST
+          # Ad-hoc signature so the bundle is internally consistent (still "unidentified").
+          codesign --force --deep -s - "$APP" || true
+          out="BlastEm-macOS-arm64-${ver}"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "${out}.zip"
+          ls -la "${out}.zip"
+
+      - name: Publish to release nightly-${{ matrix.rev.node }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nightly-${{ matrix.rev.node }}
+          name: BlastEm nightly ${{ matrix.rev.node }}
+          prerelease: true
+          body_path: body-${{ matrix.rev.node }}.md
+          files: src/BlastEm-macOS-arm64-*.zip
           fail_on_unmatched_files: true
