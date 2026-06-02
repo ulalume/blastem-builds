@@ -23,6 +23,8 @@ env:
   # by default. Upstream compiles cleanly on older clang, so downgrade just those
   # back to warnings (no source changes). Harmless for gcc/mingw.
   CWARN: '-Wno-error=incompatible-pointer-types -Wno-error=incompatible-function-pointer-types -Wno-error=int-conversion -Wno-error=implicit-int'
+  # GCC has no -Wincompatible-function-pointer-types (clang-only); use a GCC-safe subset.
+  CWARN_GCC: '-Wno-error=incompatible-pointer-types -Wno-error=int-conversion -Wno-error=implicit-int'
   SDL_WIN_VER: '2.30.9'
   GLEW_WIN_VER: '2.2.0'
 
@@ -228,6 +230,7 @@ jobs:
     needs: coordinate
     if: needs.coordinate.outputs.has_work == 'true'
     runs-on: ${{ matrix.arch == 'arm64' && 'macos-15' || 'macos-13' }}
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -270,6 +273,7 @@ jobs:
     needs: [coordinate, macos-build]
     if: needs.coordinate.outputs.has_work == 'true'
     runs-on: macos-15
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -379,7 +383,7 @@ jobs:
         working-directory: src
         run: |
           set -euo pipefail
-          make CC="gcc $CWARN" blastem
+          make CC="gcc $CWARN_GCC" blastem
           file blastem
       - name: Package (portable)
         working-directory: src
@@ -441,7 +445,7 @@ jobs:
           PKG_CONFIG_LIBDIR: /usr/lib/i386-linux-gnu/pkgconfig:/usr/share/pkgconfig
         run: |
           set -euo pipefail
-          make CPU=i686 CC="gcc $CWARN" blastem
+          make CPU=i686 CC="gcc $CWARN_GCC" blastem
           file blastem
       - name: Package (portable)
         working-directory: src
