@@ -153,9 +153,13 @@ jobs:
         working-directory: src
         run: |
           set -euo pipefail
+          # Recent emscripten/clang (19+) promotes several legacy C warnings to errors
+          # by default. Upstream compiles cleanly on older clang, so downgrade just those
+          # back to warnings via CC flags (no source changes).
+          EMCC="emcc -Wno-error=incompatible-pointer-types -Wno-error=incompatible-function-pointer-types -Wno-error=int-conversion -Wno-error=implicit-int"
           # Generate the CPU cores first (heavy single translation units) to keep memory sane.
           make CC=emcc CPU=wasm m68k.c z80.c
-          make CC=emcc CPU=wasm blastem.html
+          make CC="$EMCC" CPU=wasm blastem.html
 
       - name: Package
         working-directory: src
