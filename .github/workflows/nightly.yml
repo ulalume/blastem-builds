@@ -19,7 +19,6 @@ permissions:
   contents: write
 
 env:
-  HG_URL: https://www.retrodev.com/repos/blastem
   # Recent clang (19+) and Apple clang promote several legacy C warnings to errors
   # by default. Upstream compiles cleanly on older clang, so downgrade just those
   # back to warnings (no source changes). Harmless for gcc/mingw.
@@ -29,30 +28,26 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Clone upstream ONCE, detect every changeset that does not yet have a
-  # `nightly-<node>` release (oldest-first, capped), and publish a per-rev
-  # source tarball + release-notes markdown as an artifact for the build jobs.
+  # Detect every recent changeset that does not yet have a `nightly-<node>`
+  # release, fetch ONLY those via lightweight hgweb HTTP (no `hg clone`), and
+  # publish a per-rev source tarball + release-notes markdown as an artifact.
+  #
+  # Low upstream load by design:
+  #   * one small JSON request per run (`/json-log`, a few KB) to find new revs
+  #   * a ~2 MB `/archive/<rev>.tar.gz` ONLY for genuinely new revs (often none)
+  # No full-history clone is ever performed. State ("what's built") lives in the
+  # GitHub release tags, so nothing extra needs to be mirrored.
   # ---------------------------------------------------------------------------
   coordinate:
     runs-on: ubuntu-latest
+    env:
+      HGWEB: https://www.retrodev.com/repos/blastem
+      UA: 'blastem-builds-ci (+https://github.com/ulalume/blastem-builds)'
     outputs:
       revs: ${{ steps.detect.outputs.revs }}
       has_work: ${{ steps.detect.outputs.has_work }}
     steps:
-      - name: Install mercurial
-        run: sudo apt-get update && sudo apt-get install -y mercurial
-
-      - name: Clone upstream
-        run: |
-          set -euo pipefail
-          for i in 1 2 3 4 5; do
-            hg clone -U "$HG_URL" upstream && break
-            echo "clone attempt $i failed; retrying in 20s..." >&2
-            sleep 20
-          done
-          [ -d upstream/.hg ] || { echo "::error::Failed to clone upstream"; exit 1; }
-
-      - name: Detect unbuilt revisions
+      - name: Detect unbuilt revisions (hgweb, no clone)
         id: detect
         env:
           GH_TOKEN: ${{ github.token }}
@@ -63,10 +58,15 @@ jobs:
           set -euo pipefail
           gh release list --repo "$REPO" --limit 1000 --json tagName -q '.[].tagName' \
             > /tmp/tags.txt 2>/dev/null || true
-          hg -R upstream log -r 'reverse(0:tip)' --template '{node|short}\n' > /tmp/nodes.txt
-
+          mkdir -p sources
           cat > /tmp/detect.py <<'PY'
-          import json, os, sys
+          import json, os, sys, datetime, urllib.request
+          HGWEB = os.environ['HGWEB']
+          UA = os.environ['UA']
+          def get(path):
+              req = urllib.request.Request(HGWEB + path, headers={'User-Agent': UA})
+              with urllib.request.urlopen(req, timeout=60) as r:
+                  return json.loads(r.read().decode())
           built = set()
           try:
               for line in open('/tmp/tags.txt'):
@@ -75,64 +75,73 @@ jobs:
                       built.add(line[len('nightly-'):])
           except FileNotFoundError:
               pass
-          nodes = [l.strip() for l in open('/tmp/nodes.txt') if l.strip()]  # newest first
           manual = os.environ.get('MANUAL', '').split()
           try:
               cap = int(os.environ.get('MAXIN') or '10')
           except ValueError:
               cap = 10
+          def short(n):
+              return n[:12]
+          def isodate(dt):
+              ts, tz = dt[0], int(dt[1])
+              local = datetime.datetime.fromtimestamp(ts - tz, datetime.timezone.utc)
+              sign = '-' if tz >= 0 else '+'
+              mins = abs(tz) // 60
+              return local.strftime('%Y-%m-%d %H:%M:%S') + f' {sign}{mins//60:02d}{mins%60:02d}'
+          todo = []  # (short_node, user, desc, date)
           if manual:
-              todo = manual
+              for n in manual:
+                  d = get('/json-rev/' + n)
+                  todo.append((short(d['node']), d.get('user', ''), d.get('desc', ''), d.get('date', [0, 0])))
           else:
-              todo = []
-              for n in nodes:
-                  if n in built:
+              cs = get('/json-log').get('changesets', [])  # newest first (latest ~10)
+              for e in cs:
+                  s = short(e['node'])
+                  if s in built:
                       break
-                  todo.append(n)
+                  todo.append((s, e.get('user', ''), e.get('desc', ''), e.get('date', [0, 0])))
                   if len(todo) >= cap:
-                      print(f"::warning::Reached cap of {cap} unbuilt revs; "
-                            f"older unbuilt revs will be built on later runs.", file=sys.stderr)
+                      print(f'::warning::Reached cap of {cap} revs this run.', file=sys.stderr)
                       break
+              else:
+                  if cs and len(todo) == len(cs):
+                      print(f'::warning::All {len(cs)} returned changesets are unbuilt; '
+                            f'auto-detect window is ~{len(cs)} revs. Build older revs via the '
+                            f'manual "revs" input if needed.', file=sys.stderr)
               todo.reverse()  # chronological (oldest first)
-          revs = [{"node": n} for n in todo]
+          revs, nodes = [], []
+          for s, user, desc, dt in todo:
+              with open(f'sources/body-{s}.md', 'w') as f:
+                  f.write(f'Unofficial automated build of BlastEm at upstream changeset '
+                          f'[`{s}`]({HGWEB}/rev/{s}).\n\n')
+                  f.write(f'- **Author:** {user}\n')
+                  f.write(f'- **Date:** {isodate(dt)}\n')
+                  f.write(f'- **Changeset:** [`{s}`]({HGWEB}/rev/{s})\n\n')
+                  f.write('**Commit message**\n\n```\n' + desc.rstrip() + '\n```\n\n')
+                  f.write('---\nSource is unmodified upstream. BlastEm is GPLv3, created by Michael Pavone.\n')
+              revs.append({'node': s})
+              nodes.append(s)
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
-              out.write("revs=" + json.dumps(revs) + "\n")
-              out.write("has_work=" + ("true" if revs else "false") + "\n")
+              out.write('revs=' + json.dumps(revs) + '\n')
+              out.write('has_work=' + ('true' if revs else 'false') + '\n')
           with open('/tmp/todo.txt', 'w') as f:
-              f.write("".join(n + "\n" for n in todo))
-          print("Revisions to build:", json.dumps(revs), file=sys.stderr)
+              f.write(''.join(n + '\n' for n in nodes))
+          print('Revisions to build:', json.dumps(revs), file=sys.stderr)
           PY
           python3 /tmp/detect.py
 
-      - name: Archive sources and release notes
+      - name: Fetch sources for unbuilt revs (hgweb archive)
         if: steps.detect.outputs.has_work == 'true'
         run: |
           set -euo pipefail
-          mkdir -p sources
-          while read -r n || [ -n "$n" ]; do
-            [ -n "$n" ] || continue
-            hg archive -R upstream -r "$n" -t tgz -p src "sources/src-$n.tgz"
-            author=$(hg -R upstream log -r "$n" --template '{author}')
-            cdate=$(hg -R upstream log -r "$n" --template '{date|isodate}')
-            hg -R upstream log -r "$n" --template '{desc}' > /tmp/desc.txt
-            {
-              echo "Unofficial automated build of BlastEm at upstream changeset [\`$n\`](https://www.retrodev.com/repos/blastem/rev/$n)."
-              echo
-              echo "- **Author:** $author"
-              echo "- **Date:** $cdate"
-              echo "- **Changeset:** [\`$n\`](https://www.retrodev.com/repos/blastem/rev/$n)"
-              echo
-              echo "**Commit message**"
-              echo
-              echo '```'
-              cat /tmp/desc.txt
-              echo
-              echo '```'
-              echo
-              echo "---"
-              echo "Source is unmodified upstream. BlastEm is GPLv3, created by Michael Pavone."
-            } > "sources/body-$n.md"
-            echo "prepared $n"
+          while read -r node || [ -n "$node" ]; do
+            [ -n "$node" ] || continue
+            curl -fSL -A "$UA" --retry 5 --retry-delay 15 --max-time 180 \
+              -o raw.tgz "$HGWEB/archive/$node.tar.gz"
+            rm -rf repack && mkdir -p repack/src
+            tar xzf raw.tgz -C repack/src --strip-components=1
+            tar czf "sources/src-$node.tgz" -C repack src
+            echo "fetched + repacked $node"
           done < /tmp/todo.txt
           ls -la sources
 
