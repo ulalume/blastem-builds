@@ -60,13 +60,21 @@ jobs:
             > /tmp/tags.txt 2>/dev/null || true
           mkdir -p sources
           cat > /tmp/detect.py <<'PY'
-          import json, os, sys, datetime, urllib.request
+          import json, os, sys, time, datetime, urllib.request
           HGWEB = os.environ['HGWEB']
           UA = os.environ['UA']
           def get(path):
-              req = urllib.request.Request(HGWEB + path, headers={'User-Agent': UA})
-              with urllib.request.urlopen(req, timeout=60) as r:
-                  return json.loads(r.read().decode())
+              last = None
+              for attempt in range(4):
+                  try:
+                      req = urllib.request.Request(HGWEB + path, headers={'User-Agent': UA})
+                      with urllib.request.urlopen(req, timeout=60) as r:
+                          return json.loads(r.read().decode())
+                  except Exception as e:
+                      last = e
+                      print(f'fetch {path} attempt {attempt+1} failed: {e}', file=sys.stderr)
+                      time.sleep(15 * (attempt + 1))
+              raise last
           built = set()
           try:
               for line in open('/tmp/tags.txt'):
@@ -136,7 +144,7 @@ jobs:
           set -euo pipefail
           while read -r node || [ -n "$node" ]; do
             [ -n "$node" ] || continue
-            curl -fSL -A "$UA" --retry 5 --retry-delay 15 --max-time 180 \
+            curl -fSL -A "$UA" --retry 5 --retry-delay 15 --retry-all-errors --max-time 180 \
               -o raw.tgz "$HGWEB/archive/$node.tar.gz"
             rm -rf repack && mkdir -p repack/src
             tar xzf raw.tgz -C repack/src --strip-components=1
