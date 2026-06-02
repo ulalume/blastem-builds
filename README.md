@@ -13,18 +13,17 @@
 ## What this provides
 
 The official nightlies cover 32/64-bit Linux and Windows (x86). This project adds the
-missing targets and rebuilds the x86 ones too, so every changeset gets one self-contained
-release with all platforms:
+targets they do not (Apple Silicon / Intel macOS, Linux arm64, WebAssembly) and rebuilds
+the x86 desktop ones, so every changeset gets one self-contained release:
 
 | Target | Runner | CPU core | Status |
 |---|---|---|---|
-| WebAssembly (WebGL) | ubuntu + emsdk | interpreter | ✅ implemented |
-| macOS (Universal `.app`, Intel + Apple Silicon) | macos-13 + macos-14 | JIT / interpreter | ⏳ planned |
-| Linux arm64 | ubuntu-24.04-arm | interpreter | ⏳ planned |
-| Linux x86_64 | ubuntu-latest | JIT | ⏳ planned |
-| Linux x86 (32-bit) | ubuntu + multilib | JIT | ⏳ planned |
-| Windows x86_64 | ubuntu + mingw-w64 | JIT | ⏳ planned |
-| Windows x86 (32-bit) | ubuntu + mingw-w64 | JIT | ⏳ planned |
+| WebAssembly (WebGL) | ubuntu + emsdk | interpreter | ✅ |
+| macOS (`.app`) | macos | JIT / interpreter | ⏳ |
+| Linux arm64 | ubuntu-24.04-arm | interpreter | ✅ |
+| Linux x86_64 | ubuntu-latest | JIT | ✅ |
+| Windows x86_64 | ubuntu + mingw-w64 | JIT | ✅ |
+| Windows x86 (32-bit) | ubuntu + mingw-w64 | JIT | ✅ |
 
 > Note: BlastEm uses a native-code JIT on x86/x86_64 only. On every other architecture
 > (ARM, WebAssembly) it automatically falls back to a portable C interpreter (`NEW_CORE`).

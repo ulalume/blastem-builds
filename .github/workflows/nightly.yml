@@ -412,67 +412,6 @@ jobs:
           fail_on_unmatched_files: true
 
   # ---------------------------------------------------------------------------
-  # Linux x86 (32-bit, JIT) via multilib.
-  # ---------------------------------------------------------------------------
-  linux-i686:
-    needs: coordinate
-    if: needs.coordinate.outputs.has_work == 'true'
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        rev: ${{ fromJSON(needs.coordinate.outputs.revs) }}
-    steps:
-      - name: Install dependencies
-        run: |
-          sudo dpkg --add-architecture i386
-          sudo apt-get update
-          sudo apt-get install -y build-essential gcc-multilib python3 patchelf zip file \
-            libsdl2-dev:i386 libglew-dev:i386 zlib1g-dev:i386
-      - name: Download sources
-        uses: actions/download-artifact@v4
-        with:
-          name: sources
-      - name: Extract source @ ${{ matrix.rev.node }}
-        run: |
-          set -euo pipefail
-          tar xzf "src-${{ matrix.rev.node }}.tgz"
-          sed -i -E "s/(define BLASTEM_VERSION \"[^-]+)-pre\"/\1-pre-${{ matrix.rev.node }}\"/" src/version.inc || true
-      - name: Build (i686)
-        working-directory: src
-        env:
-          PKG_CONFIG_PATH: /usr/lib/i386-linux-gnu/pkgconfig
-          PKG_CONFIG_LIBDIR: /usr/lib/i386-linux-gnu/pkgconfig:/usr/share/pkgconfig
-        run: |
-          set -euo pipefail
-          make CPU=i686 CC="gcc $CWARN_GCC" blastem
-          file blastem
-      - name: Package (portable)
-        working-directory: src
-        run: |
-          set -euo pipefail
-          ver=$(sed -E -n 's/^[^B]+BLASTEM_VERSION "([^"]+)"/\1/p' version.inc)
-          dir="blastem-linux-i686-${ver}"
-          mkdir -p "$dir/lib"
-          cp blastem "$dir/"
-          cp -r shaders images default.cfg rom.db gamecontrollerdb.txt systems.cfg COPYING "$dir/"
-          ldd blastem | awk '/libSDL2|libGLEW/ {print $3}' | while read -r p; do
-            [ -n "$p" ] && cp -Lv "$p" "$dir/lib/"
-          done
-          patchelf --set-rpath '$ORIGIN/lib' "$dir/blastem"
-          tar czf "${dir}.tar.gz" "$dir"
-          ls -la "${dir}.tar.gz"
-      - name: Publish
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: nightly-${{ matrix.rev.node }}
-          name: BlastEm nightly ${{ matrix.rev.node }}
-          prerelease: true
-          body_path: body-${{ matrix.rev.node }}.md
-          files: src/blastem-linux-i686-*.tar.gz
-          fail_on_unmatched_files: true
-
-  # ---------------------------------------------------------------------------
   # Windows x86_64 and x86 (32-bit), cross-compiled with mingw-w64 (as upstream).
   # ---------------------------------------------------------------------------
   windows:
