@@ -226,9 +226,10 @@ jobs:
           fail_on_unmatched_files: true
 
   # ---------------------------------------------------------------------------
-  # macOS Universal .app, built entirely on an Apple Silicon runner (no Intel
-  # runner). SDL2 + GLEW are built as universal (arm64+x86_64) from source so
-  # blastem can be compiled for both arches and lipo'd into one binary.
+  # macOS: two separate .app bundles (Apple Silicon arm64 + Intel x86_64), both
+  # built on an Apple Silicon runner (no Intel runner needed). SDL2 + GLEW are
+  # built universal (arm64+x86_64) from source once, so blastem can be compiled
+  # for each arch against them.
   # ---------------------------------------------------------------------------
   macos:
     needs: coordinate
@@ -281,36 +282,14 @@ jobs:
           echo "UNIV=$UNIV" >> "$GITHUB_ENV"
           echo "=== universal dep check ==="; lipo -info "$UNIV"/lib/libSDL2*.dylib "$UNIV"/lib/libGLEW*.dylib || true
 
-      - name: Build blastem (arm64 + x86_64) and lipo
+      - name: Build blastem + .app (arm64 and x86_64, separate apps)
         working-directory: src
         run: |
           set -euo pipefail
           export PKG_CONFIG_PATH="$UNIV/lib/pkgconfig"
-          # arm64 — NEW_CORE interpreter (default CPU on this host)
-          rm -rf obj blastem
-          make CC="clang -arch arm64 $CWARN" blastem
-          mv blastem ../blastem-arm64
-          # x86_64 — JIT
-          rm -rf obj blastem
-          make CPU=x86_64 CC="clang -arch x86_64 $CWARN" blastem
-          mv blastem ../blastem-x86_64
-          lipo -create ../blastem-arm64 ../blastem-x86_64 -output blastem
-          lipo -info blastem
-
-      - name: Assemble Universal .app
-        working-directory: src
-        run: |
-          set -euo pipefail
           ver=$(sed -E -n 's/^[^B]+BLASTEM_VERSION "([^"]+)"/\1/p' version.inc)
-          APP="BlastEm.app"; rm -rf "$APP"
-          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resources"
-          cp blastem "$APP/Contents/MacOS/"
-          cp -R shaders images default.cfg rom.db gamecontrollerdb.txt systems.cfg COPYING "$APP/Contents/MacOS/"
-          cp ../ci/assets/BlastEm.icns "$APP/Contents/Resources/BlastEm.icns"
-          # Bundle the (universal) SDL2/GLEW dylibs into the app and fix install names.
-          dylibbundler -od -b -x "$APP/Contents/MacOS/blastem" \
-            -d "$APP/Contents/Frameworks" -p "@executable_path/../Frameworks/"
-          cat > "$APP/Contents/Info.plist" <<PLIST
+          # Shared Info.plist (identical for both apps).
+          cat > /tmp/Info.plist <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0"><dict>
@@ -326,10 +305,28 @@ jobs:
             <key>NSHighResolutionCapable</key><true/>
           </dict></plist>
           PLIST
-          codesign --force --deep -s - "$APP" || true
-          echo "=== universal binary ==="; lipo -info "$APP/Contents/MacOS/blastem"
-          ditto -c -k --sequesterRsrc --keepParent "$APP" "BlastEm-macOS-${ver}.zip"
-          ls -la "BlastEm-macOS-${ver}.zip"
+          build_app() {
+            arch="$1"; cpu="$2"
+            rm -rf obj blastem
+            make $cpu CC="clang -arch $arch $CWARN" blastem
+            file blastem
+            APP="BlastEm.app"; rm -rf "$APP"
+            mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resources"
+            cp blastem "$APP/Contents/MacOS/"
+            cp -R shaders images default.cfg rom.db gamecontrollerdb.txt systems.cfg COPYING "$APP/Contents/MacOS/"
+            cp ../ci/assets/BlastEm.icns "$APP/Contents/Resources/BlastEm.icns"
+            cp /tmp/Info.plist "$APP/Contents/Info.plist"
+            # Bundle SDL2/GLEW into the app; -s gives the universal-deps prefix, </dev/null
+            # ensures dylibbundler never blocks on an interactive prompt.
+            dylibbundler -od -b -x "$APP/Contents/MacOS/blastem" \
+              -d "$APP/Contents/Frameworks" -p "@executable_path/../Frameworks/" \
+              -s "$UNIV/lib" </dev/null
+            codesign --force --deep -s - "$APP" || true
+            ditto -c -k --sequesterRsrc --keepParent "$APP" "BlastEm-macOS-$arch-${ver}.zip"
+            ls -la "BlastEm-macOS-$arch-${ver}.zip"
+          }
+          build_app arm64 ""
+          build_app x86_64 "CPU=x86_64"
 
       - name: Publish
         uses: softprops/action-gh-release@v2
