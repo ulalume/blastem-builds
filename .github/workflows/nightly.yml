@@ -94,7 +94,7 @@ jobs:
               out.write("revs=" + json.dumps(revs) + "\n")
               out.write("has_work=" + ("true" if revs else "false") + "\n")
           with open('/tmp/todo.txt', 'w') as f:
-              f.write("\n".join(todo))
+              f.write("".join(n + "\n" for n in todo))
           print("Revisions to build:", json.dumps(revs), file=sys.stderr)
           PY
           python3 /tmp/detect.py
@@ -104,7 +104,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p sources
-          while read -r n; do
+          while read -r n || [ -n "$n" ]; do
             [ -n "$n" ] || continue
             hg archive -R upstream -r "$n" -t tgz -p src "sources/src-$n.tgz"
             echo "archived $n"
