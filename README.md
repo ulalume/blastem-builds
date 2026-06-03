@@ -19,7 +19,8 @@ the x86 desktop ones, so every changeset gets one self-contained release:
 | Target | Runner | CPU core | Status |
 |---|---|---|---|
 | WebAssembly (WebGL) | ubuntu + emsdk | interpreter | ✅ |
-| macOS (`.app`) | macos | JIT / interpreter | ⏳ |
+| macOS arm64 — Apple Silicon (`.app`) | macos-14 | interpreter | ✅ |
+| macOS x86_64 — Intel (`.app`) | macos-14 | JIT | ✅ |
 | Linux arm64 | ubuntu-24.04-arm | interpreter | ✅ |
 | Linux x86_64 | ubuntu-latest | JIT | ✅ |
 | Windows x86_64 | ubuntu + mingw-w64 | JIT | ✅ |
