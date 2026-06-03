@@ -220,7 +220,8 @@ jobs:
         with:
           tag_name: nightly-${{ matrix.rev.node }}
           name: BlastEm nightly ${{ matrix.rev.node }}
-          prerelease: true
+          prerelease: false
+          make_latest: true
           body_path: body-${{ matrix.rev.node }}.md
           files: src/blastem-wasm-*.zip
           fail_on_unmatched_files: true
@@ -333,7 +334,8 @@ jobs:
         with:
           tag_name: nightly-${{ matrix.rev.node }}
           name: BlastEm nightly ${{ matrix.rev.node }}
-          prerelease: true
+          prerelease: false
+          make_latest: true
           body_path: body-${{ matrix.rev.node }}.md
           files: src/BlastEm-macOS-*.zip
           fail_on_unmatched_files: true
@@ -392,7 +394,8 @@ jobs:
         with:
           tag_name: nightly-${{ matrix.rev.node }}
           name: BlastEm nightly ${{ matrix.rev.node }}
-          prerelease: true
+          prerelease: false
+          make_latest: true
           body_path: body-${{ matrix.rev.node }}.md
           files: src/blastem-linux-*.tar.gz
           fail_on_unmatched_files: true
@@ -457,7 +460,8 @@ jobs:
         with:
           tag_name: nightly-${{ matrix.rev.node }}
           name: BlastEm nightly ${{ matrix.rev.node }}
-          prerelease: true
+          prerelease: false
+          make_latest: true
           body_path: body-${{ matrix.rev.node }}.md
           files: src/blastem-win*.zip
           fail_on_unmatched_files: true
