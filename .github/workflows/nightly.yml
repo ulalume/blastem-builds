@@ -52,6 +52,8 @@ jobs:
       revs: ${{ steps.detect.outputs.revs }}
       has_work: ${{ steps.detect.outputs.has_work }}
     steps:
+      - name: Checkout (for dated release tags)
+        uses: actions/checkout@v4
       - name: Detect unbuilt revisions (hgweb, no clone)
         id: detect
         env:
@@ -122,7 +124,7 @@ jobs:
                             f'auto-detect window is ~{len(cs)} revs. Build older revs via the '
                             f'manual "revs" input if needed.', file=sys.stderr)
               todo.reverse()  # chronological (oldest first)
-          revs, nodes = [], []
+          revs, nodes, dates = [], [], []
           for s, user, desc, dt in todo:
               with open(f'sources/body-{s}.md', 'w') as f:
                   f.write(f'Unofficial automated build of BlastEm at upstream changeset '
@@ -134,11 +136,16 @@ jobs:
                   f.write('---\nSource is unmodified upstream. BlastEm is GPLv3, created by Michael Pavone.\n')
               revs.append({'node': s})
               nodes.append(s)
+              dates.append((s, int(dt[0]), int(dt[1])))
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
               out.write('revs=' + json.dumps(revs) + '\n')
               out.write('has_work=' + ('true' if revs else 'false') + '\n')
           with open('/tmp/todo.txt', 'w') as f:
               f.write(''.join(n + '\n' for n in nodes))
+          # node + upstream commit timestamp (used to date each release tag so the
+          # Releases page sorts chronologically — GitHub orders by the tag commit date).
+          with open('/tmp/dates.txt', 'w') as f:
+              f.write(''.join(f'{s} {ts} {tz}\n' for s, ts, tz in dates))
           print('Revisions to build:', json.dumps(revs), file=sys.stderr)
           PY
           python3 /tmp/detect.py
@@ -157,6 +164,35 @@ jobs:
             echo "fetched + repacked $node"
           done < /tmp/todo.txt
           ls -la sources
+
+      - name: Create dated tags + releases
+        if: steps.detect.outputs.has_work == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          empty=$(git hash-object -t tree /dev/null)
+          gitoff() { local tz=$1 sign=- ; [ "$tz" -lt 0 ] && { sign=+; tz=$((-tz)); }; printf '%s%02d%02d' "$sign" $((tz/3600)) $(((tz%3600)/60)); }
+          # dates.txt is oldest-first, so the LAST release created gets --latest (= newest).
+          while read -r node ts tz; do
+            [ -n "$node" ] || continue
+            off=$(gitoff "$tz")
+            # Empty commit dated at the upstream changeset's time; GitHub derives a
+            # release's created_at from its tag's commit date, so this makes the
+            # Releases page sort chronologically. Push each ref individually.
+            c=$(GIT_AUTHOR_DATE="@$ts $off" GIT_COMMITTER_DATE="@$ts $off" git commit-tree "$empty" -m "nightly-$node")
+            git tag -f "nightly-$node" "$c"
+            git push -f origin "refs/tags/nightly-$node"
+            if gh release view "nightly-$node" --repo "$REPO" >/dev/null 2>&1; then
+              gh release edit "nightly-$node" --repo "$REPO" --latest
+            else
+              gh release create "nightly-$node" --repo "$REPO" \
+                --title "BlastEm nightly $node" --notes-file "sources/body-$node.md" --latest
+            fi
+          done < /tmp/dates.txt
 
       - name: Upload sources artifact
         if: steps.detect.outputs.has_work == 'true'
@@ -215,16 +251,10 @@ jobs:
           cp blastem.html "$dir"/index.html
           cp COPYING "$dir"/COPYING
           zip -r "${dir}.zip" "$dir"
-      - name: Publish
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: nightly-${{ matrix.rev.node }}
-          name: BlastEm nightly ${{ matrix.rev.node }}
-          prerelease: false
-          make_latest: true
-          body_path: body-${{ matrix.rev.node }}.md
-          files: src/blastem-wasm-*.zip
-          fail_on_unmatched_files: true
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "nightly-${{ matrix.rev.node }}" src/blastem-wasm-*.zip --clobber --repo "${{ github.repository }}"
 
   # ---------------------------------------------------------------------------
   # macOS: two separate .app bundles (Apple Silicon arm64 + Intel x86_64), both
@@ -329,16 +359,10 @@ jobs:
           build_app arm64 ""
           build_app x86_64 "CPU=x86_64"
 
-      - name: Publish
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: nightly-${{ matrix.rev.node }}
-          name: BlastEm nightly ${{ matrix.rev.node }}
-          prerelease: false
-          make_latest: true
-          body_path: body-${{ matrix.rev.node }}.md
-          files: src/BlastEm-macOS-*.zip
-          fail_on_unmatched_files: true
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "nightly-${{ matrix.rev.node }}" src/BlastEm-macOS-*.zip --clobber --repo "${{ github.repository }}"
 
   # ---------------------------------------------------------------------------
   # Linux x86_64 (JIT) and arm64 (interpreter), native runners.
@@ -389,16 +413,10 @@ jobs:
           patchelf --set-rpath '$ORIGIN/lib' "$dir/blastem"
           tar czf "${dir}.tar.gz" "$dir"
           ls -la "${dir}.tar.gz"
-      - name: Publish
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: nightly-${{ matrix.rev.node }}
-          name: BlastEm nightly ${{ matrix.rev.node }}
-          prerelease: false
-          make_latest: true
-          body_path: body-${{ matrix.rev.node }}.md
-          files: src/blastem-linux-*.tar.gz
-          fail_on_unmatched_files: true
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "nightly-${{ matrix.rev.node }}" src/blastem-linux-*.tar.gz --clobber --repo "${{ github.repository }}"
 
   # ---------------------------------------------------------------------------
   # Windows x86_64 and x86 (32-bit), cross-compiled with mingw-w64 (as upstream).
@@ -455,13 +473,7 @@ jobs:
           cp COPYING "$dir/COPYING.txt"
           zip -r "${dir}.zip" "$dir"
           ls -la "${dir}.zip"
-      - name: Publish
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: nightly-${{ matrix.rev.node }}
-          name: BlastEm nightly ${{ matrix.rev.node }}
-          prerelease: false
-          make_latest: true
-          body_path: body-${{ matrix.rev.node }}.md
-          files: src/blastem-win*.zip
-          fail_on_unmatched_files: true
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "nightly-${{ matrix.rev.node }}" src/blastem-win*.zip --clobber --repo "${{ github.repository }}"
