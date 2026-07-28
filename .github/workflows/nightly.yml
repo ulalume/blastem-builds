@@ -2,11 +2,16 @@ name: nightly
 
 on:
   schedule:
-    # ~1 hour after upstream's nightly (which starts at 11:45 PM US Pacific).
-    # 08:45 UTC = 12:45 AM PST (+1h) / 01:45 AM PDT (+2h) — always after upstream.
-    # (cron is fixed UTC and does not follow DST.) Scheduled runs only fire on the
-    # default branch and may be delayed under GitHub load.
-    - cron: '45 8 * * *'
+    # Weekly (Sunday), ~1 hour after upstream's nightly (which starts at 11:45 PM
+    # US Pacific). 08:45 UTC = 12:45 AM PST (+1h) / 01:45 AM PDT (+2h) — always
+    # after upstream. (cron is fixed UTC and does not follow DST.) Scheduled runs
+    # only fire on the default branch and may be delayed under GitHub load.
+    #
+    # Weekly rather than daily because the macos-14 leg is billed even though this
+    # repo is public (macOS runner minutes are not covered by the public-repo free
+    # tier). A week of upstream commits stays under the cap=10 backlog limit below;
+    # use workflow_dispatch to pick up a rev sooner.
+    - cron: '45 8 * * 0'
   workflow_dispatch:
     inputs:
       revs:
