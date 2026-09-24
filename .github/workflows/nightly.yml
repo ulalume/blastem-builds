@@ -176,7 +176,12 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           empty=$(git hash-object -t tree /dev/null)
           gitoff() { local tz=$1 sign=- ; [ "$tz" -lt 0 ] && { sign=+; tz=$((-tz)); }; printf '%s%02d%02d' "$sign" $((tz/3600)) $(((tz%3600)/60)); }
-          # dates.txt is oldest-first, so the LAST release created gets --latest (= newest).
+          # Only a changeset newer than the current Latest release takes the badge, so a
+          # manual build of an older rev (filling in a gap) never steals it. A release's
+          # created_at is its tag's commit date, i.e. the upstream changeset time (below).
+          # dates.txt is oldest-first, so within a run the newest one ends up Latest.
+          latest=$(gh release view --repo "$REPO" --json createdAt -q .createdAt 2>/dev/null || true)
+          latest_ts=0; [ -z "$latest" ] || latest_ts=$(date -d "$latest" +%s)
           while read -r node ts tz; do
             [ -n "$node" ] || continue
             off=$(gitoff "$tz")
@@ -186,12 +191,13 @@ jobs:
             c=$(GIT_AUTHOR_DATE="@$ts $off" GIT_COMMITTER_DATE="@$ts $off" git commit-tree "$empty" -m "nightly-$node")
             git tag -f "nightly-$node" "$c"
             git push -f origin "refs/tags/nightly-$node"
+            # Existing release = manual rebuild to fill in missing assets; jobs upload into it.
             if gh release view "nightly-$node" --repo "$REPO" >/dev/null 2>&1; then
-              gh release edit "nightly-$node" --repo "$REPO" --latest
-            else
-              gh release create "nightly-$node" --repo "$REPO" \
-                --title "BlastEm nightly $node" --notes-file "sources/body-$node.md" --latest
+              continue
             fi
+            if [ "$ts" -gt "$latest_ts" ]; then flag=--latest; latest_ts=$ts; else flag=--latest=false; fi
+            gh release create "nightly-$node" --repo "$REPO" \
+              --title "BlastEm nightly $node" --notes-file "sources/body-$node.md" "$flag"
           done < /tmp/dates.txt
 
       - name: Upload sources artifact
@@ -294,7 +300,8 @@ jobs:
           UNIV="$PWD/univ"; mkdir -p "$UNIV/lib/pkgconfig"
           ARCHS="arm64;x86_64"
           # SDL2 (universal) via CMake
-          curl -fSL -o sdl.tar.gz "https://github.com/libsdl-org/SDL/releases/download/release-${SDL_WIN_VER}/SDL2-${SDL_WIN_VER}.tar.gz"
+          curl -fSL --retry 5 --retry-delay 15 --retry-all-errors --max-time 180 \
+            -o sdl.tar.gz "https://github.com/libsdl-org/SDL/releases/download/release-${SDL_WIN_VER}/SDL2-${SDL_WIN_VER}.tar.gz"
           mkdir sdlsrc && tar xzf sdl.tar.gz -C sdlsrc --strip-components=1
           cmake -S sdlsrc -B sdlbuild -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_OSX_ARCHITECTURES="$ARCHS" -DCMAKE_INSTALL_PREFIX="$UNIV" \
@@ -302,7 +309,8 @@ jobs:
           cmake --build sdlbuild --config Release -j3
           cmake --install sdlbuild
           # GLEW (universal) via its Makefile
-          curl -fSL -o glew.tgz "https://github.com/nigels-com/glew/releases/download/glew-${GLEW_WIN_VER}/glew-${GLEW_WIN_VER}.tgz"
+          curl -fSL --retry 5 --retry-delay 15 --retry-all-errors --max-time 180 \
+            -o glew.tgz "https://github.com/nigels-com/glew/releases/download/glew-${GLEW_WIN_VER}/glew-${GLEW_WIN_VER}.tgz"
           mkdir glewsrc && tar xzf glew.tgz -C glewsrc --strip-components=1
           # STRIP=true: skip `strip`, which rejects fat (universal) objects inside a .a archive.
           make -C glewsrc GLEW_DEST="$UNIV" 'CFLAGS.EXTRA=-arch arm64 -arch x86_64' 'LDFLAGS.EXTRA=-arch arm64 -arch x86_64' STRIP=true all
@@ -434,7 +442,7 @@ jobs:
       - name: Install mingw + tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y mingw-w64 python3 zip unzip wget
+          sudo apt-get install -y mingw-w64 python3 zip unzip
       - name: Download sources
         uses: actions/download-artifact@v4
         with:
@@ -448,9 +456,11 @@ jobs:
         working-directory: src
         run: |
           set -euo pipefail
-          wget -q "https://github.com/libsdl-org/SDL/releases/download/release-${SDL_WIN_VER}/SDL2-devel-${SDL_WIN_VER}-mingw.tar.gz"
+          curl -fsSL --retry 5 --retry-delay 15 --retry-all-errors --max-time 180 \
+            -O "https://github.com/libsdl-org/SDL/releases/download/release-${SDL_WIN_VER}/SDL2-devel-${SDL_WIN_VER}-mingw.tar.gz"
           mkdir sdl && tar xzf "SDL2-devel-${SDL_WIN_VER}-mingw.tar.gz" -C sdl --strip-components=1
-          wget -q "https://github.com/nigels-com/glew/releases/download/glew-${GLEW_WIN_VER}/glew-${GLEW_WIN_VER}-win32.zip"
+          curl -fsSL --retry 5 --retry-delay 15 --retry-all-errors --max-time 180 \
+            -O "https://github.com/nigels-com/glew/releases/download/glew-${GLEW_WIN_VER}/glew-${GLEW_WIN_VER}-win32.zip"
           unzip -q "glew-${GLEW_WIN_VER}-win32.zip"
           mv "glew-${GLEW_WIN_VER}" glew
       - name: Build (${{ matrix.arch }})
