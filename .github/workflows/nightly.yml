@@ -28,6 +28,12 @@ env:
   CWARN: '-Wno-error=incompatible-pointer-types -Wno-error=incompatible-function-pointer-types -Wno-error=int-conversion -Wno-error=implicit-int'
   # GCC has no -Wincompatible-function-pointer-types (clang-only); use a GCC-safe subset.
   CWARN_GCC: '-Wno-error=incompatible-pointer-types -Wno-error=int-conversion -Wno-error=implicit-int'
+  # Deployment target for the macOS artifacts. Without it, clang and CMake stamp
+  # the runner's own OS version (minos 15.x on macos-15), which makes the x86_64
+  # build useless on the Intel Macs it exists for: most of them stop at macOS
+  # 12/13 and macOS 15 does not run on them at all. 11.0 is arm64's floor, so it
+  # is the lowest a universal SDL2/GLEW can use. LSMinimumSystemVersion matches.
+  MACOS_MIN: '11.0'
   SDL_WIN_VER: '2.30.9'
   GLEW_WIN_VER: '2.2.0'
 
@@ -304,7 +310,8 @@ jobs:
             -o sdl.tar.gz "https://github.com/libsdl-org/SDL/releases/download/release-${SDL_WIN_VER}/SDL2-${SDL_WIN_VER}.tar.gz"
           mkdir sdlsrc && tar xzf sdl.tar.gz -C sdlsrc --strip-components=1
           cmake -S sdlsrc -B sdlbuild -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_OSX_ARCHITECTURES="$ARCHS" -DCMAKE_INSTALL_PREFIX="$UNIV" \
+            -DCMAKE_OSX_ARCHITECTURES="$ARCHS" -DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOS_MIN" \
+            -DCMAKE_INSTALL_PREFIX="$UNIV" \
             -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TEST=OFF
           cmake --build sdlbuild --config Release -j3
           cmake --install sdlbuild
@@ -313,7 +320,7 @@ jobs:
             -o glew.tgz "https://github.com/nigels-com/glew/releases/download/glew-${GLEW_WIN_VER}/glew-${GLEW_WIN_VER}.tgz"
           mkdir glewsrc && tar xzf glew.tgz -C glewsrc --strip-components=1
           # STRIP=true: skip `strip`, which rejects fat (universal) objects inside a .a archive.
-          make -C glewsrc GLEW_DEST="$UNIV" 'CFLAGS.EXTRA=-arch arm64 -arch x86_64' 'LDFLAGS.EXTRA=-arch arm64 -arch x86_64' STRIP=true all
+          make -C glewsrc GLEW_DEST="$UNIV" "CFLAGS.EXTRA=-arch arm64 -arch x86_64 -mmacosx-version-min=$MACOS_MIN" "LDFLAGS.EXTRA=-arch arm64 -arch x86_64 -mmacosx-version-min=$MACOS_MIN" STRIP=true all
           make -C glewsrc GLEW_DEST="$UNIV" STRIP=true install.all
           # Deterministic glew.pc (do not depend on GLEW's installer details).
           printf 'prefix=%s\nlibdir=${prefix}/lib\nincludedir=${prefix}/include\nName: glew\nDescription: GLEW\nVersion: %s\nCflags: -I${includedir}\nLibs: -L${libdir} -lGLEW -framework OpenGL\n' \
@@ -340,14 +347,14 @@ jobs:
             <key>CFBundleExecutable</key><string>blastem</string>
             <key>CFBundleIconFile</key><string>BlastEm</string>
             <key>CFBundlePackageType</key><string>APPL</string>
-            <key>LSMinimumSystemVersion</key><string>10.13</string>
+            <key>LSMinimumSystemVersion</key><string>${MACOS_MIN}</string>
             <key>NSHighResolutionCapable</key><true/>
           </dict></plist>
           PLIST
           build_app() {
             arch="$1"; cpu="$2"
             rm -rf obj blastem
-            make $cpu CC="clang -arch $arch $CWARN" blastem
+            make $cpu CC="clang -arch $arch -mmacosx-version-min=$MACOS_MIN $CWARN" blastem
             file blastem
             APP="BlastEm.app"; rm -rf "$APP"
             mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resources"
@@ -360,6 +367,14 @@ jobs:
             dylibbundler -od -b -x "$APP/Contents/MacOS/blastem" \
               -d "$APP/Contents/Frameworks" -p "@executable_path/../Frameworks/" \
               -s "$UNIV/lib" </dev/null
+            # Informational: the only check possible without an old Mac to test on.
+            # Kept non-fatal (|| true, -f guard) so it can never fail the build.
+            echo "=== deployment target ($arch) ==="
+            for b in "$APP/Contents/MacOS/blastem" "$APP/Contents/Frameworks"/*.dylib; do
+              [ -f "$b" ] || continue
+              echo "-- ${b##*/}"
+              vtool -show-build "$b" 2>/dev/null | grep -E "platform|minos" || true
+            done
             codesign --force --deep -s - "$APP" || true
             ditto -c -k --sequesterRsrc --keepParent "$APP" "BlastEm-macOS-$arch-${ver}.zip"
             ls -la "BlastEm-macOS-$arch-${ver}.zip"
